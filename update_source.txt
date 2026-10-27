@@ -1,0 +1,5 @@
+# Administrator: write ONE line below (no #) - the folder or web address that holds latest.json.
+# Offices then get updates with one click and nobody has to type anything.
+# Example folder:   \\server\share\DTR
+# Example web page: https://example.com/dtr/latest.json
+https://github.com/TenzHash/pca-dtr-releases/releases/latest/download/latest.json
