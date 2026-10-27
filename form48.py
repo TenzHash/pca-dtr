@@ -48,11 +48,18 @@ def draw_dtr(c, name, year, month, days, office_label, sched_label, in_charge=""
     y -= 0.15 * inch; txt(mid, y, "-----o0o-----", 8, align="c")
     y -= 0.3 * inch; txt(mid, y + 3, name, 11, "Helvetica-Bold", "c", w - 0.4 * inch * k)
     c.line(x0 + 0.5 * inch * k, y, x0 + w - 0.5 * inch * k, y); txt(mid, y - 9, "(Name)", 7.5, align="c")
-    if division:
-        txt(x0 + 2, y - 9, division, 6.5, maxw=w * 0.33)
-    if id_no:
-        txt(x0 + w, y - 9, f"ID No. {id_no}", 7, align="r")
-    y -= 0.28 * inch; txt(x0 + 0.1 * inch, y, "For the month of", 9)
+    y -= 0.30 * inch                                    # ID number and department row
+    idw = w * 0.30
+    txt(x0 + 0.1 * inch * k, y, "ID No.:", 8)
+    lx = x0 + 0.1 * inch * k + stringWidth("ID No.: ", "Helvetica", fs(8))
+    c.line(lx, y - 2, x0 + idw, y - 2)
+    txt(lx + 2, y, str(id_no or ""), 9, "Helvetica-Bold", maxw=x0 + idw - lx - 2)
+    dx = x0 + idw + 0.15 * inch * k
+    txt(dx, y, "Department:", 8)
+    lx2 = dx + stringWidth("Department: ", "Helvetica", fs(8))
+    c.line(lx2, y - 2, x0 + w - 0.1 * inch, y - 2)
+    txt(lx2 + 2, y, division or "", 8.5, "Helvetica-Bold", maxw=x0 + w - 0.1 * inch - lx2 - 3)
+    y -= 0.27 * inch; txt(x0 + 0.1 * inch, y, "For the month of", 9)
     txt(x0 + w * 0.5, y, f"{calendar.month_name[month].upper()} {year}", 10, "Helvetica-Bold", "c")
     c.line(x0 + w * 0.3, y - 2, x0 + w - 0.1 * inch, y - 2)
     y -= 0.19 * inch; txt(x0 + 0.1 * inch, y, "Official hours for arrival and departure:", 7.5)
