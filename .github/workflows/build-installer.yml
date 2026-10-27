@@ -1,0 +1,69 @@
+name: Build installer
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      SIGN_PFX: ${{ secrets.SIGN_PFX_BASE64 }}
+      SIGN_PFX_PASSWORD: ${{ secrets.SIGN_PFX_PASSWORD }}
+      RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+      RELEASES_REPO: TenzHash/pca-dtr-releases
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Build program
+        run: >
+          python -m PyInstaller --onedir --windowed --name DTR_Generator --paths .
+          --hidden-import zkparser --hidden-import schedules --hidden-import form48
+          --hidden-import roster --hidden-import generate_dtr --hidden-import ui --hidden-import app
+          --hidden-import version --hidden-import xlrd --hidden-import webview --collect-data reportlab desktop.py
+      - name: Sign program (only if a certificate secret is set)
+        if: ${{ env.SIGN_PFX != '' }}
+        run: |
+          $pfx = "$env:RUNNER_TEMP\sign.pfx"; [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGN_PFX))
+          $st = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1).FullName
+          & $st sign /f $pfx /p $env:SIGN_PFX_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 dist\DTR_Generator\DTR_Generator.exe
+      - name: Build installer
+        run: |
+          $v = python -c "import version;print(version.VERSION)"
+          choco install innosetup -y --no-progress
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" installer.iss
+      - name: Sign installer (only if a certificate secret is set)
+        if: ${{ env.SIGN_PFX != '' }}
+        run: |
+          $pfx = "$env:RUNNER_TEMP\sign.pfx"
+          $st = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1).FullName
+          & $st sign /f $pfx /p $env:SIGN_PFX_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 installer_output\DTR_Generator_Setup.exe
+      - name: Write update manifest
+        run: |
+          $v = python -c "import version;print(version.VERSION)"
+          $h = (Get-FileHash installer_output\DTR_Generator_Setup.exe -Algorithm SHA256).Hash.ToLower()
+          @{version=$v; file="DTR_Generator_Setup.exe"; sha256=$h} | ConvertTo-Json | Set-Content installer_output\latest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DTR_Generator_Release
+          path: |
+            installer_output/DTR_Generator_Setup.exe
+            installer_output/latest.json
+      - name: Publish release to the public releases repository
+        if: ${{ env.RELEASE_TOKEN != '' }}
+        run: |
+          $env:GH_TOKEN = $env:RELEASE_TOKEN
+          $v = python -c "import version;print(version.VERSION)"
+          gh release delete "v$v" --repo $env:RELEASES_REPO --yes --cleanup-tag 2>$null
+          gh release create "v$v" installer_output/DTR_Generator_Setup.exe installer_output/latest.json --repo $env:RELEASES_REPO --title "DTR Generator $v" --notes "Release $v" --latest
+      - name: Publish release in this repository (when no RELEASE_TOKEN is set)
+        if: ${{ env.RELEASE_TOKEN == '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = python -c "import version;print(version.VERSION)"
+          gh release delete "v$v" --yes --cleanup-tag 2>$null
+          gh release create "v$v" installer_output/DTR_Generator_Setup.exe installer_output/latest.json --title "DTR Generator $v" --notes "Release $v" --latest
