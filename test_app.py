@@ -3,6 +3,7 @@ import os, shutil, sys, tempfile
 tmp = tempfile.mkdtemp(); os.environ["DTR_DATA"] = tmp
 import app as A
 c = A.app.test_client()
+assert c.post("/api/setup", json={"username": "tester", "display": "HR Tester", "password": "Test-Pass-123"}).status_code == 200   # sign in (first run)
 src = sys.argv[1]
 for f in sorted(os.listdir(src)):
     if f.lower().endswith((".xls", ".xlsx")):
@@ -28,7 +29,7 @@ bad = c.post("/api/correct", json={"ym": ym, "key": k, "date": day, "edits": {"a
 bad = c.post("/api/correct", json={"ym": ym, "key": k, "date": day, "edits": {"am_in": "8am"}, "reason": "x"}); assert bad.status_code == 400
 ok = c.post("/api/correct", json={"ym": ym, "key": k, "date": day, "edits": {"am_in": "08:00", "pm_out": "17:00"}, "reason": "Forgot to punch"}).json; assert ok["changed"] == 2
 row = next(r for r in c.get(f"/api/employee/{ym}/{k}").json["rows"] if r["date"] == day); assert row["corrected"] and row["pm_out"] == "17:00" and set(row["ov"]) == {"am_in", "pm_out"}
-log = c.get(f"/api/audit?ym={ym}&key={k}").json; assert len(log) == 2 and log[0]["operator"] == "HR Tester" and log[0]["reason"] == "Forgot to punch"
+log = c.get(f"/api/audit?ym={ym}&key={k}").json; assert len(log) == 2 and log[0]["operator"] == "HR Tester (tester)" and log[0]["reason"] == "Forgot to punch"
 assert c.get(f"/pdf/{ym}/{k}").status_code == 200 and c.get("/audit.csv").status_code == 200
 assert c.post("/api/correct/revert", json={"ym": ym, "key": k, "date": day}).json["changed"] == 2
 row = next(r for r in c.get(f"/api/employee/{ym}/{k}").json["rows"] if r["date"] == day); assert not row["corrected"] and row["kind"] == "absent"

@@ -10,7 +10,7 @@ Opens its own window (needs Microsoft Edge WebView2, built into Windows 11 and c
 pick a month, review every employee (flags for incomplete punches), add Leave / Official Business
 remarks per date range, preview each DTR, then download all DTRs (PDF), individual PDFs (ZIP) or the
 HR summary (Excel). Everything is stored in a `DTR_Data` folder beside the program - copy it to back up.
-`python test_app.py <folder> [roster.xlsx]` runs an end-to-end check.
+`python test_app.py <folder> [roster.xlsx]` runs an end-to-end check (it creates its own test administrator).
 
 ## Command line (same engine)
     pip install -r requirements.txt
@@ -22,6 +22,37 @@ Outputs: `output/DTR_<office>_<YYYY-MM>.pdf` (one page per employee) and `..._su
 Useful options: `--office catanduanes|camarines-norte|naga|iriga|masbate|sorsogon|regional`,
 `--employee "Santos"`, `--individual` (one PDF each), `--utility "Name1,Name2"`,
 `--holidays 2026-12-30`, `--in-charge "NAME"`, `--ot-threshold 30`. `python tests.py` checks the rules.
+
+## Sign-in, roles and accounts (v1.1)
+The program asks for a username and password. Each PC keeps its own accounts in `accounts.json` (scrambled PBKDF2 passwords,
+never plain text) inside the data folder. `accounts.json` and `auth_log.csv` are **not** part of backups, so restoring a backup never
+changes who can sign in.
+
+**First run on a PC:** the setup screen creates the first administrator and shows a one-time **recovery code**. Write it down; the
+Regional Office keeps it sealed. If both administrators forget their passwords, *Sign in > Administrator: use the recovery code* sets a new
+password (and issues a new code - each code works once).
+
+| | Administrator | P.O Clerk |
+|---|---|---|
+| View, edit, print, download DTRs | every office | her own offices / stations only |
+| Leave and OB remarks | yes, plus "for everyone" (holiday / suspension) | for her staff only |
+| Upload attendance files | yes | yes |
+| Settings, holidays, roster, remove files, backup / restore, updates | yes | no (she can switch dark mode and print layout) |
+| Accounts page, full audit log, sign-in history | yes | no (she sees her own audit entries) |
+
+* **Nobody can change their own DTR**, clerks and admins alike. An account is linked to its roster entry (by name and ID number); that
+  record opens read-only for its owner. Another administrator, or the clerk of that office, makes the change and the audit log records who.
+* **Offices come from the roster headings** (e.g. `SORSOGON P.O` -> `sorsogon`). A clerk sees only staff whose roster office is one of her
+  offices. An optional **Stations** list narrows it further by the roster's DIVISION / STATION text (for example `albay`).
+* **Staff who are not in the roster** are listed for administrators only, under "Not assigned to an office".
+* **Usernames** are the employee ID once it is in the roster, otherwise a short login name. A new account gets a random temporary password,
+  shown once; the person must choose their own (at least 8 characters) at first sign-in. A forgotten clerk password is reset by an administrator.
+* The program signs out after **15 idle minutes**; an account **locks for 5 minutes after 5 wrong passwords**.
+* **Moving accounts between PCs:** Accounts > *Export* (all, or one account) and *Import* on the other PC. Only scrambled passwords travel in
+  the file; if an account exists on both, the newer copy wins. Administrators normally exist on every PC; a clerk only on her office's PC.
+* The data files themselves are not encrypted: the login stops casual access and gives accountability, not protection against someone with full access to the PC.
+
+`python test_auth.py` checks all of this with made-up data.
 
 ## Rules implemented
 | Schedule | Required |
