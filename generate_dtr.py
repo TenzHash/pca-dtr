@@ -58,23 +58,30 @@ def build_month(md, emp, sched_name, rules, args):
         date = dt.date(md.year, md.month, dd)
         wd = date.weekday()
         user = remarks_for(rules, emp.key, date)
+        gl = [r for who, d1, d2, r in rules if who == "*" and d1 <= date <= d2 and wd < 5]   # "for everyone" = a declared holiday
+        user = [x for x in user if x not in gl]
         mins = dedupe(emp.punches.get(date, []))
-        holiday = date in md.holidays or date in args.holiday_set
+        holiday = date in md.holidays or date in args.holiday_set or bool(gl)
+        hlabel = gl[0].upper() if gl else "HOLIDAY"
         off = wd >= 5 or holiday
-        res = compute_day(dd, date, mins, SCHEDULES[sched_name].get(wd), off, args.ot_threshold,
-                          getattr(args, 'overrides', {}).get((emp.key, date)))
+        res = compute_day(dd, date, mins, SCHEDULES[sched_name].get(wd), off, args.ot_threshold, None, hlabel)
         code = emp.sched.get(date)
         if code in (25, 26):
             user.append({25: "LEAVE", 26: "OFFICIAL BUSINESS / OUT"}[code])
         po = getattr(args, 'post', {}).get((emp.key, date), {})
         if res.present:
             res.notes = user + res.notes
+            if off:
+                res.kind = "saturday" if wd == 5 else "sunday" if wd == 6 else "holiday"
         else:
             if date not in md.covered:
                 res.kind = "nodata"
             elif wd == 5: res.kind = "saturday"
             elif wd == 6: res.kind = "sunday"
-            elif holiday: res.kind = "holiday"
+            elif holiday:
+                res.kind = "holiday"
+                if gl:
+                    res.notes = [hlabel]
             elif user: res.kind, res.notes = "remark", user
             else:
                 res.kind = "absent"; res.review.append("no punches on a working day")
@@ -123,7 +130,7 @@ def auto_holidays(md, log=print):
 
 
 def summarize(results):
-    work = [r for r in results if r.present]
+    work = [r for r in results if r.present and not r.lone]
     return dict(days_present=len(work), absences=sum(r.kind == "absent" for r in results),
                 late_count=sum(r.late > 0 for r in work), ut=sum(r.ut for r in results),
                 ot=sum(r.ot for r in results), review=sum(bool(r.review) for r in results),
@@ -133,19 +140,19 @@ def summarize(results):
 def write_summary(path, rows, detail):
     wb = openpyxl.Workbook(); ws = wb.active; ws.title = "Summary"
     head = ["Employee", "Schedule", "Days Present", "Absences", "Times Late", "Undertime (h:mm)",
-            "Undertime (min)", "Overtime (h:mm)", "Overtime (min)", "Days to Review", "Manual Corrections", "ID No.", "Office", "Division / Station", "Supervisor"]
+            "Undertime (min)", "Days to Review", "Manual Corrections", "ID No.", "Office", "Division / Station", "Supervisor"]
     ws.append(head)
     for r in rows:
         ws.append([r["name"], r["sched"], r["days_present"], r["absences"], r["late_count"],
-                   f"{r['ut']//60}:{r['ut']%60:02d}", r["ut"], f"{r['ot']//60}:{r['ot']%60:02d}", r["ot"], r["review"], r["corrected"], r.get("id_no", ""), r.get("office", ""), r.get("division", ""), r.get("supervisor", "")])
+                   f"{r['ut']//60}:{r['ut']%60:02d}", r["ut"], r["review"], r["corrected"], r.get("id_no", ""), r.get("office", ""), r.get("division", ""), r.get("supervisor", "")])
     ws2 = wb.create_sheet("Daily Detail")
     ws2.append(["Employee", "Date", "Day", "AM In", "AM Out", "PM In", "PM Out", "Late (min)",
-                "Early Out (min)", "Excess Lunch (min)", "Undertime (min)", "Overtime (min)", "Remarks", "Review Flag", "Manually Corrected"])
+                "Early Out (min)", "Excess Lunch (min)", "Undertime (min)", "Remarks", "Review Flag", "Manually Corrected"])
     f = lambda m: "" if m is None else f"{m//60:02d}:{m%60:02d}"
     for name, date, d in detail:
         label = {"saturday": "SATURDAY", "sunday": "SUNDAY", "holiday": "HOLIDAY", "absent": "ABSENT"}.get(d.kind, "")
         ws2.append([name, date, date.strftime("%a"), f(d.am_arr), f(d.am_dep), f(d.pm_arr), f(d.pm_dep),
-                    d.late, d.early, d.excess_lunch, d.ut, d.ot, "; ".join(d.notes) or label, "; ".join(d.review), "YES" if d.corrected else ""])
+                    d.late, d.early, d.excess_lunch, d.ut, "; ".join(d.notes) or label, "; ".join(d.review), "YES" if d.corrected else ""])
     for sh in (ws, ws2):
         for c in sh[1]:
             c.font = Font(bold=True, color="FFFFFF"); c.fill = PatternFill("solid", fgColor="1F4E78")

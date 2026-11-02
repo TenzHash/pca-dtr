@@ -6,7 +6,7 @@ from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.lib.colors import HexColor
 from reportlab.pdfgen import canvas
 
-COLS = [.38, .72, .72, .72, .72, .52, .52, .70, 2.30]      # Day, AM in/out, PM in/out, UT h/m, OT, Remarks (inches @ full width)
+COLS = [.38, .72, .72, .72, .72, .52, .52, 3.00]      # Day, AM in/out, PM in/out, UT h/m, Remarks (inches @ full width)
 ROW = 0.198 * inch
 
 
@@ -71,37 +71,39 @@ def draw_dtr(c, name, year, month, days, office_label, sched_label, in_charge=""
     txt((XS[0] + XS[1]) / 2, top - hh / 2 - 3, "Day", 8, "Helvetica-Bold", "c")
     for a, b, t in ((1, 3, "A.M."), (3, 5, "P.M."), (5, 7, "Undertime")):
         txt((XS[a] + XS[b]) / 2, top - ROW * .62, t, 8, "Helvetica-Bold", "c")
-    txt((XS[7] + XS[8]) / 2, top - hh / 2 - 3, "Overtime", 5.6, "Helvetica-Bold", "c")
-    txt((XS[8] + XS[9]) / 2, top - hh / 2 - 3, "Remarks", 8, "Helvetica-Bold", "c")
+    txt((XS[7] + XS[8]) / 2, top - hh / 2 - 3, "Remarks", 8, "Helvetica-Bold", "c")
     for i, t in enumerate(("Arrival", "Departure", "Arrival", "Departure", "Hours", "Minutes"), start=1):
         txt((XS[i] + XS[i + 1]) / 2, top - hh + 4, t, 6.2, align="c")
-    for i in (1, 3, 5, 7, 8):
+    for i in (1, 3, 5, 7):
         c.line(XS[i], top - hh, XS[i], top)
     for i in (2, 4, 6):
         c.line(XS[i], top - hh, XS[i], top - ROW)
     c.line(XS[1], top - ROW, XS[7], top - ROW)
 
-    ry, tot_ut, tot_ot = top - hh, 0, 0
+    ry, tot_ut = top - hh, 0
     by_day, nd = {d.day: d for d in days}, calendar.monthrange(year, month)[1]
     for dd in range(1, 32):
         d = by_day.get(dd)
         sp = list(d.spans) if d else []
         if d and not sp and not d.present and d.kind in ("saturday", "sunday", "holiday", "absent", "remark"):
-            lab = {"saturday": "SATURDAY", "sunday": "SUNDAY", "holiday": "HOLIDAY", "absent": "ABSENT"}.get(d.kind) \
+            lab = (d.notes[0].upper() if d.kind == "holiday" and d.notes else None) \
+                or {"saturday": "SATURDAY", "sunday": "SUNDAY", "holiday": "HOLIDAY", "absent": "ABSENT"}.get(d.kind) \
                 or (d.notes[0].upper() if d.notes else "")
             sp = [(0, 3, lab)]
         cov = {i for a, b, t in sp for i in range(a, b + 1)}
         inner = {i for a, b, t in sp for i in range(a + 2, b + 2)}        # cell borders hidden inside merged cells
         if d:
             fills = dict(d.fill)
-            if d.kind in ("saturday", "sunday", "holiday") and not d.present:
+            if d.kind in ("saturday", "sunday", "holiday"):
                 for i in range(4):
                     fills.setdefault(i, "#eeeeee")
             for ci, col in fills.items():
+                if ci > 6:                                         # colors saved for the removed Overtime layout
+                    continue
                 c.setFillColor(HexColor(col)); c.rect(XS[ci + 1], ry - ROW, XS[ci + 2] - XS[ci + 1], ROW, fill=1, stroke=0)
             c.setFillGray(0)
         c.rect(x0, ry - ROW, w, ROW)
-        for i in range(1, 9):
+        for i in range(1, 8):
             if i not in inner:
                 c.line(XS[i], ry - ROW, XS[i], ry)
         base = ry - ROW + 5
@@ -115,18 +117,16 @@ def draw_dtr(c, name, year, month, days, office_label, sched_label, in_charge=""
             if d.ut:
                 txt((XS[5] + XS[6]) / 2, base, str(d.ut // 60) if d.ut >= 60 else "", 8, align="c")
                 txt((XS[6] + XS[7]) / 2, base, str(d.ut % 60) if d.ut % 60 else "", 8, align="c")
-            txt((XS[7] + XS[8]) / 2, base, hhmm(d.ot), 7.5, align="c")
-            txt(XS[8] + 2, base, "; ".join(d.notes) if d.present or d.kind != "remark" or d.spans else "", 6.8, maxw=XS[9] - XS[8] - 3)
-            tot_ut += d.ut; tot_ot += d.ot
+            txt(XS[7] + 2, base, "" if (not d.present and not d.spans and d.kind in ("holiday", "remark")) else "; ".join(d.notes), 6.8, maxw=XS[8] - XS[7] - 3)
+            tot_ut += d.ut
         ry -= ROW
     th = ROW * 1.1
     c.rect(x0, ry - th, w, th)
-    for i in (5, 6, 7, 8):
+    for i in (5, 6, 7):
         c.line(XS[i], ry - th, XS[i], ry)
     txt(x0 + 4, ry - ROW * .75, "TOTAL", 8.5, "Helvetica-Bold")
     txt((XS[5] + XS[6]) / 2, ry - ROW * .75, str(tot_ut // 60), 8.5, "Helvetica-Bold", "c")
     txt((XS[6] + XS[7]) / 2, ry - ROW * .75, str(tot_ut % 60), 8.5, "Helvetica-Bold", "c")
-    txt((XS[7] + XS[8]) / 2, ry - ROW * .75, hhmm(tot_ot) or "0:00", 7.5, "Helvetica-Bold", "c")
     ry -= th
     nh = 0.34 * inch                                   # monthly note box
     c.rect(x0, ry - nh, w, nh); txt(x0 + 3, ry - 8, "MONTHLY NOTE:", 6.5, "Helvetica-Bold")
@@ -156,7 +156,7 @@ def draw_dtr(c, name, year, month, days, office_label, sched_label, in_charge=""
     ry -= 0.42 * inch; sig_block(sig_emp, name, "(Signature over printed name)")
     ry -= 0.26 * inch; txt(x0, ry, "VERIFIED as to the prescribed office hours.", 7.5, maxw=w)
     ry -= 0.42 * inch; sig_block(sig_inc, in_charge or "", "(In Charge)")
-    return tot_ut, tot_ot
+    return tot_ut
 
 
 def draw_page(c, copies=2, **kw):
@@ -168,6 +168,5 @@ def draw_page(c, copies=2, **kw):
     else:
         draw_dtr(c, **kw)
     c.setFont("Helvetica-Oblique", 5.5); c.setFillGray(.45)
-    c.drawString(0.35 * inch, 0.2 * inch, "Computed from ZKTeco biometric logs. UT = late arrival + early departure + excess lunch; "
-                 "OT = departure past the latest official out-time.")
+    c.drawString(0.35 * inch, 0.2 * inch, "Times are read from the ZKTeco biometric device and cannot be edited. UT = late arrival + early departure + excess lunch.")
     c.setFillGray(0); c.showPage()

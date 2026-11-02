@@ -3,7 +3,7 @@ import os, shutil, sys, tempfile
 tmp = tempfile.mkdtemp(); os.environ["DTR_DATA"] = tmp
 import app as A
 c = A.app.test_client()
-assert c.post("/api/setup", json={"username": "tester", "display": "HR Tester", "password": "Test-Pass-123"}).status_code == 200   # sign in (first run)
+c.post("/api/settings", json={"operator": "Admin, Test A."})
 src = sys.argv[1]
 for f in sorted(os.listdir(src)):
     if f.lower().endswith((".xls", ".xlsx")):
@@ -22,18 +22,19 @@ print([r["note"] or r["kind"] for r in e["rows"] if r["date"] in ("2026-08-05", 
 assert c.post("/api/settings", json={"office": "sorsogon", "in_charge": "J. DELA CRUZ"}).status_code == 200
 for url, mt in ((f"/pdf/{ym}", "pdf"), (f"/pdf/{ym}/{k}", "pdf"), (f"/xlsx/{ym}", "sheet"), (f"/zip/{ym}", "zip")):
     r = c.get(url); assert r.status_code == 200 and len(r.data) > 1000, url; print(url, len(r.data), "bytes")
-# manual correction + audit trail
-c.post("/api/settings", json={"office": "regional", "operator": "HR Tester"})
-day = next(r for r in c.get(f"/api/employee/{ym}/{k}").json["rows"] if r["kind"] == "absent")["date"]
-bad = c.post("/api/correct", json={"ym": ym, "key": k, "date": day, "edits": {"am_in": "08:00"}, "reason": ""}); assert bad.status_code == 400
-bad = c.post("/api/correct", json={"ym": ym, "key": k, "date": day, "edits": {"am_in": "8am"}, "reason": "x"}); assert bad.status_code == 400
-ok = c.post("/api/correct", json={"ym": ym, "key": k, "date": day, "edits": {"am_in": "08:00", "pm_out": "17:00"}, "reason": "Forgot to punch"}).json; assert ok["changed"] == 2
-row = next(r for r in c.get(f"/api/employee/{ym}/{k}").json["rows"] if r["date"] == day); assert row["corrected"] and row["pm_out"] == "17:00" and set(row["ov"]) == {"am_in", "pm_out"}
-log = c.get(f"/api/audit?ym={ym}&key={k}").json; assert len(log) == 2 and log[0]["operator"] == "HR Tester (tester)" and log[0]["reason"] == "Forgot to punch"
-assert c.get(f"/pdf/{ym}/{k}").status_code == 200 and c.get("/audit.csv").status_code == 200
-assert c.post("/api/correct/revert", json={"ym": ym, "key": k, "date": day}).json["changed"] == 2
-row = next(r for r in c.get(f"/api/employee/{ym}/{k}").json["rows"] if r["date"] == day); assert not row["corrected"] and row["kind"] == "absent"
-print("corrections + audit trail OK;", len(c.get(f"/api/audit?ym={ym}&key={k}").json), "log rows")
+# biometric times are read-only (server side)
+day = next(r["date"] for r in c.get(f"/api/employee/{ym}/{k}").json["rows"] if r["kind"] == "absent")
+assert c.post("/api/correct", json={"ym": ym, "key": k, "date": day, "edits": {"am_in": "08:00"}, "reason": "x"}).status_code == 400
+r = c.post("/api/cells", json={"ym": ym, "key": k, "cells": [{"date": day, "field": "am_in", "value": "08:00"}]}); assert r.status_code == 400 and r.json["code"] == "readonly"
+assert next(x for x in c.get(f"/api/employee/{ym}/{k}").json["rows"] if x["date"] == day)["kind"] == "absent"
+# a holiday typed for everyone is a real holiday: people who punched that day get holiday work, not a late/half-day workday
+hd = "2026-08-21"; assert c.post("/api/remarks", json={"employee": "*", "start": hd, "remark": "Ninoy Aquino Day"}).status_code == 200
+rows = [next(x for x in c.get(f"/api/employee/{ym}/{e['key']}").json["rows"] if x["date"] == hd) for e in all_emps[:30]] if False else None
+for e in c.get(f"/api/month/{ym}").json["employees"]:
+    row = next(x for x in c.get(f"/api/employee/{ym}/{e['key']}").json["rows"] if x["date"] == hd)
+    assert row["kind"] == "holiday" and row["ut"] == 0 and "NINOY AQUINO DAY" in row["note"], row
+c.post("/api/remarks/delete", json={"index": len(c.get("/api/state").json["remarks"]) - 1})
+print("read-only times + holiday for everyone OK")
 # Excel-style cell edits
 cells = [{"date": day, "field": "ut", "value": "75"}, {"date": day, "field": "ot", "value": "30"}, {"date": day, "field": "remark", "value": "Field work"}, {"field": "month_note", "value": "Seminar on Aug 5"}]
 assert c.post("/api/cells", json={"ym": ym, "key": k, "cells": cells}).json["changed"] == 4
@@ -55,10 +56,10 @@ for lay in ("one", "two"): r = c.get(f"/pdf/{ym}/{k}?layout={lay}"); assert r.st
 assert c.post("/api/settings", json={"theme": "dark"}).status_code == 200 and c.get("/api/state").json["settings"]["theme"] == "dark"
 c.post("/api/signature/delete", json={"kind": "emp", "key": k}); assert not c.get(f"/api/employee/{ym}/{k}").json["sig_emp"]
 print("signatures, layouts, theme OK")
-cells = [{"date": day, "field": "am_in", "value": ""}, {"date": day, "field": "am_out", "value": ""}, {"date": day, "field": "merge", "value": "0-1:OFFICIAL BUSINESS"}, {"date": day, "field": "fill", "value": "2:#ffe699,7:#c6efce"}, {"date": day, "field": "remark", "value": "see memo"}]
+cells = [{"date": day, "field": "merge", "value": "0-1:OFFICIAL BUSINESS"}, {"date": day, "field": "fill", "value": "2:#ffe699,6:#c6efce"}, {"date": day, "field": "remark", "value": "see memo"}]
 assert c.post("/api/cells", json={"ym": ym, "key": k, "cells": cells}).json["changed"] >= 3
 row = next(r for r in c.get(f"/api/employee/{ym}/{k}").json["rows"] if r["date"] == day)
-assert row["spans"] == [[0, 1, "OFFICIAL BUSINESS", 0]] and row["fill"] == {"2": "#ffe699", "7": "#c6efce"} and row["note"] == "see memo"
+assert row["spans"] == [[0, 1, "OFFICIAL BUSINESS", 0]] and row["fill"] == {"2": "#ffe699", "6": "#c6efce"} and row["note"] == "see memo"
 assert c.get(f"/pdf/{ym}/{k}").status_code == 200
 assert c.post("/api/correct/revert", json={"ym": ym, "key": k, "date": day}).status_code == 200
 row = next(r for r in c.get(f"/api/employee/{ym}/{k}").json["rows"] if r["date"] == day); assert row["spans"] == [] and row["fill"] == {}
@@ -81,4 +82,15 @@ e = c.get(f"/api/employee/{ym}/{k}").json; assert "division" in e and "superviso
 assert c.get(f"/pdf/{ym}/{k}").status_code == 200
 print("division / supervisor OK")
 assert c.get("/").status_code == 200 and c.get("/api/month/1999-01").status_code == 404
+# ---------------- no login: everything is open
+assert c.get("/api/state").status_code == 200 and c.get("/api/me").status_code == 404 and c.get("/api/users").status_code == 404
+print("no login OK")
+r = c.post("/api/settings", json={"holidays": ["2026-8-20", "08/24/2026", "Aug 25, 2026", "tomorrow", "2026-02-30"]}).json
+assert r["invalid"] == ["tomorrow", "2026-02-30"], r
+assert c.get("/api/state").json["settings"]["holidays"] == ["2026-08-20", "2026-08-24", "2026-08-25"]
+hm_ = c.get(f"/api/month/{ym}").json["holidays"]; assert {"2026-08-20", "2026-08-24", "2026-08-25"} <= set(h[:10] for h in hm_), hm_
+c.post("/api/remarks", json={"employee": "*", "start": "2026-08-26", "end": "2026-08-27", "remark": "Typhoon"})
+hm_ = c.get(f"/api/month/{ym}").json["holidays"]; assert "2026-08-26 (TYPHOON)" in hm_ and "2026-08-27 (TYPHOON)" in hm_, hm_
+c.post("/api/remarks/delete", json={"index": len(c.get("/api/state").json["remarks"]) - 1}); c.post("/api/settings", json={"holidays": []})
+print("holiday settings + list OK")
 print("web app OK; outputs saved:", os.listdir(os.path.join(tmp, "output")))

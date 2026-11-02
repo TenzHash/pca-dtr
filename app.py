@@ -4,15 +4,14 @@
 All data lives in a 'DTR_Data' folder next to the program (attendance files, roster,
 remarks, settings, generated PDFs), so an office can back it up by copying one folder.
 """
-import csv, datetime as dt, getpass, hashlib, io, json, os, re, shutil, subprocess, sys, tempfile, threading, urllib.error, urllib.parse, urllib.request, webbrowser, zipfile
+import csv, datetime as dt, getpass, hashlib, io, json, os, re, secrets, shutil, subprocess, sys, tempfile, time, threading, urllib.error, urllib.parse, urllib.request, webbrowser, zipfile
 
-from flask import Flask, abort, g, jsonify, make_response, request, send_file
+from flask import Flask, abort, jsonify, request, send_file
 
 BASE = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 from zkparser import load_directory, norm_key
-from roster import load_roster, lookup
-import auth as A
+from roster import load_roster
 from schedules import PROVINCES
 import generate_dtr as G
 from version import VERSION
@@ -33,11 +32,10 @@ SETTINGS, REMARKS, ROSTER, AUDIT = (os.path.join(DATA, x) for x in ("settings.js
 for d in (ATT, OUT):
     os.makedirs(d, exist_ok=True)
 
-AUTH = A.Auth(DATA)
-COOKIE = "dtr_session"
 DEFAULTS = dict(office="regional", in_charge="", ot_threshold=0, holidays=[], utility="", operator="", layout="two", theme="", update_source="", division="")
 OFFICES = ["regional"] + sorted(PROVINCES)
 app = Flask(__name__)
+
 _lock = threading.Lock()
 _alock = threading.Lock()
 _cache = {"sig": None, "months": {}, "roster": {}, "roster_sig": None}
@@ -82,52 +80,6 @@ def write_remarks(rows):
         w = csv.DictWriter(f, fieldnames=["employee", "date", "remark"]); w.writeheader(); w.writerows(rows)
 
 
-# ------------------------------------------------------------------ who may see / change what
-def user():
-    return getattr(g, "user", None)
-
-
-def visible(emp, roster):
-    """May the signed-in account see this employee? (Everyone may see their own record.)"""
-    u = user()
-    if u is None:
-        return True
-    info = lookup(roster, emp)
-    return A.in_scope(u, info) or A.is_self(u, emp, info)
-
-
-def is_self(emp, roster):
-    u = user()
-    return bool(u) and A.is_self(u, emp, lookup(roster, emp))
-
-
-def find_emp(key):
-    months, roster = data()
-    for md in months.values():
-        if key in md.employees:
-            return md.employees[key], roster
-    return None, roster
-
-
-def deny(msg, code=403):
-    abort(make_response(jsonify(error=msg), code))
-
-
-def guard_write(key):
-    """Stop the request unless the signed-in account may change this employee's record."""
-    u = user()
-    emp, roster = find_emp(key)
-    if emp is None:
-        if u["role"] != "admin":
-            deny("Employee not found.", 404)
-        return
-    if not visible(emp, roster):
-        deny("That employee is not in your office.")
-    if is_self(emp, roster):
-        deny("You cannot change your own DTR. Ask another administrator or your supervisor to make the change. "
-             "The audit log records who did it.")
-
-
 def month_items(ym, only=None):
     months, roster = data()
     try:
@@ -136,9 +88,9 @@ def month_items(ym, only=None):
         abort(404)
     md = months.get((y, m)) or abort(404)
     s = settings()
-    extra = {dt.date.fromisoformat(h) for h in s["holidays"]}
+    extra = {dt.date.fromisoformat(h) for h in norm_dates(s["holidays"])[0]}
     util = {norm_key(x) for x in s["utility"].split(",") if x.strip()}
-    emps = [e for e in G.month_employees(md, roster) if visible(e, roster)]
+    emps = G.month_employees(md, roster)
     if only:
         emps = [e for e in emps if e.key == only] or abort(404)
     rules = G.load_remarks(REMARKS)
@@ -170,7 +122,6 @@ def _sig_clear(kind, key):
 @app.post("/api/signature")
 def sig_upload():
     kind, key, f = request.form.get("kind", "emp"), request.form.get("key", ""), request.files.get("file")
-    guard_sig(kind, key)
     ext = os.path.splitext(f.filename or "")[1].lower().lstrip(".") if f else ""
     if ext not in ("png", "jpg", "jpeg"):
         return jsonify(error="Use a PNG or JPG image."), 400
@@ -182,25 +133,12 @@ def sig_upload():
 
 @app.post("/api/signature/delete")
 def sig_delete():
-    guard_sig(request.json.get("kind", "emp"), request.json.get("key", ""))
     _sig_clear(request.json.get("kind", "emp"), request.json.get("key", ""))
     return jsonify(ok=True)
 
 
-def guard_sig(kind, key):
-    if kind == "incharge":
-        if user()["role"] != "admin":
-            deny("Only an administrator can change the In Charge signature.")
-    else:
-        guard_write(key)
-
-
 @app.get("/sig/<kind>/<key>")
 def sig_get(kind, key):
-    if kind != "incharge":
-        emp, roster = find_emp(key)
-        if emp is not None and not visible(emp, roster):
-            abort(404)
     p = sig_path(kind, key)
     return send_file(p) if p else abort(404)
 
@@ -333,34 +271,24 @@ def update_install():
 @app.get("/api/state")
 def state():
     months, roster = data()
-    st, rem = settings(), read_remarks()
-    if user()["role"] != "admin":
-        st.pop("update_source", None)
-        rem = [r for r in rem if r.get("employee") == "*" or _remark_visible(r.get("employee", ""), roster)]
-    return jsonify(version=VERSION, settings=st, files=files(), offices=OFFICES, roster=bool(roster),
-                   months=[f"{y}-{m:02d}" for (y, m) in sorted(months)], remarks=rem)
-
-
-def _remark_visible(key, roster):
-    emp, _ = find_emp(key)
-    return emp is not None and visible(emp, roster)
+    return jsonify(version=VERSION, settings=settings(), files=files(), offices=OFFICES, roster=bool(roster),
+                   months=[f"{y}-{m:02d}" for (y, m) in sorted(months)],
+                   remarks=[dict(r, i=i) for i, r in enumerate(read_remarks())])
 
 
 @app.post("/api/settings")
 def save_settings():
-    allowed = DEFAULTS if user()["role"] == "admin" else ("theme", "layout")
-    s = settings(); s.update({k: v for k, v in request.json.items() if k in allowed})
+    s = settings(); s.update({k: v for k, v in request.json.items() if k in DEFAULTS})
     if s["office"] not in OFFICES:
         abort(400)
+    s["holidays"], bad = norm_dates(s["holidays"])                      # keep only dates that can be read
     json.dump(s, open(SETTINGS, "w", encoding="utf-8"), indent=2)
-    return jsonify(ok=True)
+    return jsonify(ok=True, invalid=bad)
 
 
 @app.post("/api/upload")
 def upload():
     kind = request.form.get("kind", "attendance")
-    if kind == "roster" and user()["role"] != "admin":
-        deny("Only an administrator can load the roster.")
     for f in request.files.getlist("files"):
         name = os.path.basename(f.filename)
         if kind == "roster":
@@ -378,12 +306,46 @@ def delete_file():
     return jsonify(ok=True)
 
 
+def norm_dates(items):
+    """Accept 2026-08-21, 2026-8-21, 08/21/2026, Aug 21 2026 ... -> (ISO dates, entries that could not be read)."""
+    ok, bad = [], []
+    for raw in items or []:
+        s = str(raw).strip()
+        if not s:
+            continue
+        d = None
+        m = re.fullmatch(r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", s)
+        try:
+            if m:
+                d = dt.date(int(m[1]), int(m[2]), int(m[3]))
+            else:
+                for fmt in ("%m/%d/%Y", "%B %d, %Y", "%B %d %Y", "%b %d, %Y", "%b %d %Y", "%d %B %Y", "%d %b %Y"):
+                    try:
+                        d = dt.datetime.strptime(s, fmt).date(); break
+                    except ValueError:
+                        pass
+        except ValueError:
+            d = None
+        (ok if d else bad).append(d.isoformat() if d else s)
+    return sorted(set(ok)), bad
+
+
 @app.get("/api/month/<ym>")
 def month(ym):
     md, items, s = month_items(ym)
-    roster = data()[1]
-    return jsonify(holidays=sorted(d.isoformat() for d in md.holidays), office=s["office"],
-                   employees=[dict(key=i["emp"].key, unassigned=bool(roster) and not lookup(roster, i["emp"]), **i["summary"]) for i in items])
+    hol = {d: "" for d in md.holidays}                                   # detected from the attendance
+    for d in norm_dates(s["holidays"])[0]:                               # typed in Settings
+        d = dt.date.fromisoformat(d)
+        if (d.year, d.month) == (md.year, md.month) and d.weekday() < 5:
+            hol.setdefault(d, "")
+    for who, d1, d2, r in G.load_remarks(REMARKS):                       # "for everyone" remarks
+        if who == "*":
+            for n in range((d2 - d1).days + 1):
+                d = d1 + dt.timedelta(n)
+                if (d.year, d.month) == (md.year, md.month) and d.weekday() < 5:
+                    hol[d] = r.upper()
+    return jsonify(holidays=[d.isoformat() + (f" ({n})" if n else "") for d, n in sorted(hol.items())], office=s["office"],
+                   employees=[dict(key=i["emp"].key, **i["summary"]) for i in items])
 
 
 @app.get("/api/employee/<ym>/<key>")
@@ -406,7 +368,7 @@ def employee(ym, key):
                          ov=ovd.get(date, []),
                          note="; ".join(r.notes), review="; ".join(r.review)))
     return jsonify(name=it["name"], sched=it["summary"]["sched"], rows=rows, note=notes.get((key, ym), ""), office=s["office"], id_no=it["id_no"], office_label=it["office_label"], division=it["division"], supervisor=it["supervisor"], sup_roster=it["sup_roster"],
-                   sig_emp=bool(sig_path("emp", key)), sig_inc=bool(sig_path("incharge")), own=is_self(it["emp"], data()[1]))
+                   sig_emp=bool(sig_path("emp", key)), sig_inc=bool(sig_path("incharge")))
 
 
 @app.post("/api/remarks")
@@ -415,11 +377,6 @@ def add_remark():
     rows = read_remarks()
     if not j.get("remark", "").strip() or not j.get("start"):
         abort(400)
-    if (j.get("employee") or "*") == "*":
-        if user()["role"] != "admin":
-            deny("Only an administrator can add a remark for everyone (holiday or suspension).")
-    else:
-        guard_write(j["employee"])
     d = j["start"] + (":" + j["end"] if j.get("end") and j["end"] != j["start"] else "")
     rows.append(dict(employee=j.get("employee") or "*", date=d, remark=j["remark"].strip().upper()))
     write_remarks(rows)
@@ -430,12 +387,6 @@ def add_remark():
 def del_remark():
     rows = read_remarks(); i = int(request.json["index"])
     if 0 <= i < len(rows):
-        who = rows[i].get("employee", "*")
-        if who == "*":
-            if user()["role"] != "admin":
-                deny("Only an administrator can remove a remark for everyone.")
-        else:
-            guard_write(who)
         rows.pop(i); write_remarks(rows)
     return jsonify(ok=True)
 
@@ -490,10 +441,7 @@ def load_overrides():
         if f == "month_note":
             notes[(r["employee_key"], r["date"][:7])] = r["new"]
         elif f in UI2SLOT:
-            if r["new"] == REVERT:
-                slots.get(k, {}).pop(UI2SLOT[f], None)
-            else:
-                slots.setdefault(k, {})[UI2SLOT[f]] = parse_hm(r["new"])
+            pass                                              # times read from the device are never overridden
         elif f in POST_FIELDS:
             if r["new"] == REVERT:
                 post.get(k, {}).pop(f, None)
@@ -503,14 +451,13 @@ def load_overrides():
 
 
 def operator_name():
-    u = user()
-    return A.operator_label(u) if u else (settings().get("operator", "").strip() or getpass.getuser())
+    return settings().get("operator", "").strip() or getpass.getuser()
 
 
 @app.post("/api/correct")
 def correct():
+    return jsonify(error="Times read from the biometric device cannot be edited.", code="readonly"), 400
     j = request.json
-    guard_write(j["key"])
     reason = (j.get("reason") or "").strip()
     if not reason:
         return jsonify(error="A reason is required for every correction."), 400
@@ -538,13 +485,14 @@ def correct():
 def cells():
     """Excel-style edits: [{date, field, value}] for time cells, ut / ot (minutes), remark, month_note."""
     j = request.json
-    guard_write(j["key"])
     reason = (j.get("reason") or "").strip() or "Manual edit"
     md, items, s = month_items(j["ym"], j["key"])
     it = items[0]; ts = dt.datetime.now().isoformat(timespec="seconds"); rows = []
     try:
         for c in j["cells"]:
             f, date, val = c["field"], c.get("date") or f"{j['ym']}-01", str(c.get("value", "")).strip()
+            if f in UI2SLOT:
+                return jsonify(error="Times read from the biometric device cannot be edited.", code="readonly"), 400
             if f == "month_note":
                 old = ""
             else:
@@ -571,7 +519,6 @@ def cells():
 @app.post("/api/correct/revert")
 def revert():
     j = request.json
-    guard_write(j["key"])
     k = (j["key"], dt.date.fromisoformat(j["date"]))
     ov = load_overrides()[0].get(k, {}); pov = load_overrides()[1].get(k, {})
     md, items, s = month_items(j["ym"], j["key"])
@@ -593,9 +540,6 @@ def revert():
 def audit():
     key, ym = request.args.get("key"), request.args.get("ym", "")
     rows = [r for r in audit_rows() if (not key or r["employee_key"] == key) and r["date"].startswith(ym)]
-    if user()["role"] != "admin":
-        mine = f"({user()['username']})"
-        rows = [r for r in rows if r["operator"].endswith(mine)]
     return jsonify(rows[::-1])
 
 
@@ -646,170 +590,6 @@ def zip_individual(ym):
             z.writestr(f"{it['name'].replace(',', '').replace('.', '')}.pdf", one.getvalue())
     buf.seek(0)
     return send_file(buf, mimetype="application/zip", as_attachment=True, download_name=f"DTR_{s['office']}_{ym}_individual.zip")
-
-
-# ------------------------------------------------------------------ sign-in, accounts, permissions
-OPEN_ENDPOINTS = {"index", "api_me", "api_login", "api_setup", "api_recover"}
-FORCED_CHANGE_OK = {"api_me", "api_password", "api_logout", "api_ping"}
-ADMIN_ONLY = {"backup", "restore", "update_check", "update_install", "delete_file", "audit_csv"}      # + every acct_* endpoint
-
-
-@app.before_request
-def gate():
-    ep = request.endpoint or ""
-    if ep in OPEN_ENDPOINTS:
-        return None
-    try:
-        u = AUTH.current(request.cookies.get(COOKIE))
-    except A.AuthError:
-        u = None
-    if u is None:
-        return jsonify(error="Please sign in.", login=True), 401
-    g.user = u
-    if u.get("must_change") and ep not in FORCED_CHANGE_OK:
-        return jsonify(error="Choose your own password first."), 403
-    if (ep in ADMIN_ONLY or ep.startswith("acct_")) and u["role"] != "admin":
-        return jsonify(error="Only an administrator can do this."), 403
-    return None
-
-
-@app.after_request
-def no_cache(resp):
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
-
-
-@app.errorhandler(A.AuthError)
-def auth_error(e):
-    return jsonify(error=str(e)), 400
-
-
-def _signed_in(token, payload):
-    r = make_response(jsonify(payload))
-    r.set_cookie(COOKIE, token, httponly=True, samesite="Strict", path="/")
-    return r
-
-
-@app.get("/api/me")
-def api_me():
-    try:
-        if AUTH.needs_setup():
-            return jsonify(setup=True)
-        u = AUTH.current(request.cookies.get(COOKIE))
-    except A.AuthError as e:
-        return jsonify(error=str(e)), 500
-    return jsonify(user=u) if u else jsonify(login=True)
-
-
-@app.post("/api/setup")
-def api_setup():
-    j = request.json or {}
-    _, code = AUTH.first_setup(j.get("username"), j.get("display"), j.get("password"))
-    token, u = AUTH.login(j.get("username"), j.get("password"))
-    return _signed_in(token, dict(user=u, recovery=code))
-
-
-@app.post("/api/login")
-def api_login():
-    j = request.json or {}
-    token, u = AUTH.login(j.get("username"), j.get("password"))
-    return _signed_in(token, dict(user=u))
-
-
-@app.post("/api/logout")
-def api_logout():
-    AUTH.logout(request.cookies.get(COOKIE))
-    r = make_response(jsonify(ok=True)); r.delete_cookie(COOKIE, path="/")
-    return r
-
-
-@app.post("/api/ping")
-def api_ping():
-    return jsonify(ok=True)
-
-
-@app.post("/api/password")
-def api_password():
-    j = request.json or {}
-    AUTH.change_password(user()["username"], j.get("old"), j.get("new"), request.cookies.get(COOKIE))
-    return jsonify(ok=True)
-
-
-@app.post("/api/recover")
-def api_recover():
-    j = request.json or {}
-    return jsonify(recovery=AUTH.recover(j.get("code"), j.get("username"), j.get("password")))
-
-
-@app.get("/api/accounts")
-def acct_list():
-    roster = data()[1]
-    people = sorted((dict(key=norm_key(e["name"]), name=e["name"], id_no=e["id_no"], office=A.office_key(e["office"]), unit=e["unit"])
-                     for e in roster.values()), key=lambda p: p["name"])
-    return jsonify(users=AUTH.list_users(), people=people, me=user()["username"],
-                   offices=sorted(set(OFFICES) | {p["office"] for p in people if p["office"]}))
-
-
-@app.post("/api/accounts/create")
-def acct_create():
-    j = request.json or {}
-    u, temp = AUTH.create_user(user()["username"], j.get("username"), j.get("display"), j.get("role"), j.get("offices"),
-                               j.get("stations"), j.get("roster_key"), j.get("id_no"))
-    return jsonify(user=u, temp=temp)
-
-
-@app.post("/api/accounts/update")
-def acct_update():
-    j = request.json or {}
-    ch = {k: j[k] for k in ("role", "display", "offices", "stations", "disabled") if k in j}
-    return jsonify(user=AUTH.update_user(user()["username"], j.get("username"), **ch))
-
-
-@app.post("/api/accounts/reset")
-def acct_reset():
-    return jsonify(temp=AUTH.reset_password((request.json or {}).get("username"), user()["username"]))
-
-
-@app.post("/api/accounts/unlock")
-def acct_unlock():
-    AUTH.unlock(user()["username"], (request.json or {}).get("username"))
-    return jsonify(ok=True)
-
-
-@app.post("/api/accounts/delete")
-def acct_delete():
-    AUTH.delete_user(user()["username"], (request.json or {}).get("username"))
-    return jsonify(ok=True)
-
-
-@app.get("/api/accounts/history")
-def acct_history():
-    return jsonify(AUTH.history())
-
-
-@app.post("/api/accounts/recovery")
-def acct_recovery():
-    return jsonify(recovery=AUTH.new_recovery_code(user()["username"], (request.json or {}).get("password")))
-
-
-@app.get("/accounts.json")
-def acct_export():
-    names = [x for x in request.args.get("users", "").split(",") if x.strip()]
-    r = make_response(json.dumps(AUTH.export_users(names or None), indent=1))
-    r.headers["Content-Type"] = "application/json"
-    r.headers["Content-Disposition"] = f'attachment; filename="DTR_Accounts_{dt.datetime.now():%Y%m%d_%H%M}.json"'
-    return r
-
-
-@app.post("/api/accounts/import")
-def acct_import():
-    f = request.files.get("file")
-    try:
-        data_in = json.loads(f.stream.read(2_000_000).decode("utf-8-sig"))
-    except Exception:
-        raise A.AuthError("This is not an accounts file exported from the DTR Generator.")
-    res = AUTH.import_users(user()["username"], data_in)
-    return jsonify(res)
 
 
 @app.get("/")

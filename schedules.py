@@ -56,6 +56,7 @@ class DayResult:
     present: bool = False
     spans: list = field(default_factory=list)   # [(first_cell, last_cell, text)] merged cells over the 4 time cells
     fill: dict = field(default_factory=dict)    # {cell_index: '#rrggbb'}
+    lone: bool = False        # a single punch on a rest day: shown, but not counted as a day worked
     corrected: bool = False   # a manual correction changed this day
 
 
@@ -119,7 +120,7 @@ def reconcile(r):
     return dict(am_arr=a, am_dep=b, pm_arr=c, pm_dep=e), mode, auto
 
 
-def compute_day(day: int, date, punches, window, is_off: bool, ot_threshold=0, override=None) -> DayResult:
+def compute_day(day: int, date, punches, window, is_off: bool, ot_threshold=0, override=None, off_label="HOLIDAY") -> DayResult:
     """punches: sorted minute list; window: schedule tuple for that weekday (None on rest days);
     is_off: weekend/holiday; override: {slot: minutes or None(blank)} from manual corrections."""
     d = DayResult(day=day)
@@ -143,8 +144,10 @@ def compute_day(day: int, date, punches, window, is_off: bool, ot_threshold=0, o
     d.present = True
     d.am_arr, d.am_dep, d.pm_arr, d.pm_dep = r["am_arr"], r["am_dep"], r["pm_arr"], r["pm_dep"]
     if is_off or window is None:
-        d.notes = ["REST DAY/HOLIDAY WORK"]
-        d.review.append("rest-day/holiday punches")
+        lab = "SATURDAY" if date.weekday() == 5 else "SUNDAY" if date.weekday() == 6 else (off_label or "HOLIDAY")
+        d.lone = len(punches) < 2                              # one tap on a rest day is not a day of work
+        d.notes = [f"{lab} - SINGLE PUNCH" if d.lone else f"{lab} WORK"]
+        d.review.append("single punch on a rest day" if d.lone else "worked on a rest day / holiday")
         return d
     if mode == "partial":
         return d

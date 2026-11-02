@@ -48,4 +48,9 @@ for hdr, idv in ((["ITEM NO", "NAME OF INCUMBENT", "ID NO.", "POSITION TITLE", "
     assert e["name"] == "Dela Cruz, Juan A." and e["unit"] == "Admin Unit" and e["supervisor"] == "A. BOSS" and e["office"] == "REGIONAL OFFICE V" and e["sched"] == "provincial"
 no_id = openpyxl.Workbook(); ws = no_id.active; ws.title = "Regular"; ws.append(["ITEM NO", "NAME OF INCUMBENT", "POSITION TITLE", "DIVISION", "SUPERVISOR", "REMARKS"]); ws.append(["1", "A, B.", "x", "y", "z", ""])
 p = os.path.join(tempfile.mkdtemp(), "n.xlsx"); no_id.save(p); assert load_roster(p).by_id == {} and len(load_roster(p)) == 1
+# rest days: a lone punch is not a day worked; a real in/out pair is
+import datetime as _dt
+r = compute_day(9, _dt.date(2026, 8, 9), [H(8, 51)], None, True); assert r.lone and r.notes == ["SUNDAY - SINGLE PUNCH"] and r.ut == 0
+r = compute_day(8, _dt.date(2026, 8, 8), [H(8), H(12)], None, True); assert not r.lone and r.notes == ["SATURDAY WORK"]
+r = compute_day(21, _dt.date(2026, 8, 21), [H(8, 30), H(17)], SCHEDULES["regional"][4], True, 0, None, "NINOY AQUINO DAY"); assert r.notes == ["NINOY AQUINO DAY WORK"] and r.late == 0 and r.ut == 0
 print("all rule checks passed")
